@@ -13,10 +13,26 @@ uv run uvicorn main:app --reload
 ```
 
 Open <http://127.0.0.1:8000/> for the token-based local dashboard. The default
-database is `./agent-relay.db`; set `RELAY_DATABASE_URL` to use another SQLite
-file. `GET /health` is a liveness check and `GET /ready` verifies database
+database is `./agent-relay.db`; set `RELAY_DATABASE_URL` to point at another
+SQLite file or at PostgreSQL (`postgresql+psycopg://user:pass@host:5432/db`).
+`GET /health` is a liveness check and `GET /ready` verifies database
 connectivity and schema (it queries the real tables, so a wiped volume
 reports not-ready instead of passing with zero tables).
+
+## Run it with Docker Compose (PostgreSQL)
+
+```bash
+docker compose up --build
+```
+
+This starts a `postgres` service and the API together; the API waits for
+Postgres's healthcheck and connects over `RELAY_DATABASE_URL`. The dashboard
+is still at <http://127.0.0.1:8000/>. `database.py`'s SQLite-only `BEGIN
+IMMEDIATE` writer transaction is replaced by ordinary PostgreSQL transactions
+plus explicit row locks (`for_update()` in `database.py`, used by
+`storage.py`'s claim/heartbeat/terminal/recovery operations) -- `claim_one`
+in particular uses `SELECT ... FOR UPDATE SKIP LOCKED` so concurrent workers
+never claim the same task.
 
 Register two identities and send a task:
 

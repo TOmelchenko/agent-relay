@@ -29,6 +29,7 @@ from database import (
     as_db_time,
     db_session,
     db_time,
+    for_update,
     immediate_transaction,
     iso_time,
     recover_expired,
@@ -145,10 +146,13 @@ def claim_one(agent_id: str, worker_id: str | None) -> dict[str, Any] | None:
         now = utcnow()
         recover_expired_in_session(db, now)
         task = db.scalar(
-            select(Task)
-            .where(Task.recipient_id == agent_id, Task.status == "queued")
-            .order_by(Task.created_at, Task.id)
-            .limit(1)
+            for_update(
+                select(Task)
+                .where(Task.recipient_id == agent_id, Task.status == "queued")
+                .order_by(Task.created_at, Task.id)
+                .limit(1),
+                skip_locked=True,
+            )
         )
         if task is None:
             return None
@@ -189,13 +193,13 @@ def claim_one(agent_id: str, worker_id: str | None) -> dict[str, Any] | None:
 
 def _find_attempt_for_token(db: Session, task_id: str, token: str) -> Attempt | None:
     return db.scalar(
-        select(Attempt).where(Attempt.task_id == task_id, Attempt.claim_token_hash == secret_hash(token))
+        for_update(select(Attempt).where(Attempt.task_id == task_id, Attempt.claim_token_hash == secret_hash(token)))
     )
 
 
 def heartbeat(task_id: str, agent_id: str, claim_token: str) -> str:
     with immediate_transaction() as db:
-        task = db.get(Task, task_id)
+        task = db.scalar(for_update(select(Task).where(Task.id == task_id)))
         if task is None or task.recipient_id != agent_id:
             raise RelayError("not_found", "Task not found.", 404)
         attempt = _find_attempt_for_token(db, task_id, claim_token)
@@ -222,7 +226,7 @@ def commit_terminal(
     value: str,
 ) -> dict[str, str]:
     with immediate_transaction() as db:
-        task = db.get(Task, task_id)
+        task = db.scalar(for_update(select(Task).where(Task.id == task_id)))
         if task is None or task.recipient_id != agent_id:
             raise RelayError("not_found", "Task not found.", 404)
         attempt = _find_attempt_for_token(db, task_id, claim_token)
