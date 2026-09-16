@@ -84,17 +84,51 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Build Docker image
-        run: docker build -t agent-relay:local .
+      # Unique per run so the Deployment's pod template actually changes and
+      # a rollout has something to do -- reusing a fixed tag like ":local"
+      # would make `kubectl set image` a no-op and `rollout status` return
+      # instantly without ever re-pulling anything.
+      - name: Compute a unique image tag
+        run: echo "IMAGE_TAG=$(git rev-parse --short HEAD 2>/dev/null || echo local)-$(date +%s)" >> "$GITHUB_ENV"
 
+      - name: Build Docker image
+        run: docker build -t agent-relay:$IMAGE_TAG .
+
+      # Real CI has no kind/kubectl preinstalled and no cluster of its own,
+      # so helm/kind-action provisions both, plus a disposable cluster.
+      # Under `act` (ACT=true is set automatically), skip that and reuse
+      # whatever kind cluster already exists on the host running act --
+      # that's the entire point of testing with act instead of a hosted
+      # runner: it can actually reach the developer's local Docker/kind.
       - name: Create kind cluster
+        if: ${{ !env.ACT }}
         uses: helm/kind-action@v1
         with:
           cluster_name: agent-relay
           wait: 60s
 
+      # Under act, this is talking to whatever kind cluster already exists
+      # on the host running act. The kind CLI's `load docker-image` reads
+      # the node's containerd config, whose format is tied to the kind
+      # version that created the cluster -- so this must stay in step with
+      # the locally installed `kind` version (`kind version` on the host),
+      # not just "latest".
+      - name: Ensure kind and kubectl are available
+        if: ${{ env.ACT }}
+        run: |
+          if ! command -v kubectl >/dev/null; then
+            curl -Lo /usr/local/bin/kubectl "https://dl.k8s.io/release/$(curl -Ls https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+            chmod +x /usr/local/bin/kubectl
+          fi
+          if ! command -v kind >/dev/null; then
+            curl -Lo /usr/local/bin/kind "https://kind.sigs.k8s.io/dl/v0.33.0/kind-linux-amd64"
+            chmod +x /usr/local/bin/kind
+          fi
+          kubectl config use-context kind-agent-relay
+          kubectl cluster-info
+
       - name: Load image into kind
-        run: kind load docker-image agent-relay:local --name agent-relay
+        run: kind load docker-image agent-relay:$IMAGE_TAG --name agent-relay
 
       - name: Deploy manifests
         run: kubectl apply -f k8s/
@@ -102,8 +136,10 @@ jobs:
       - name: Wait for PostgreSQL to be ready
         run: kubectl wait --for=condition=ready pod -l app=postgres --timeout=120s
 
-      - name: Wait for Agent Relay to be ready
-        run: kubectl wait --for=condition=ready pod -l app=agent-relay --timeout=120s
+      - name: Roll out the new image
+        run: |
+          kubectl set image deployment/agent-relay agent-relay=agent-relay:$IMAGE_TAG
+          kubectl rollout status deployment/agent-relay --timeout=180s
 
       - name: Smoke test the deployment
         run: |
